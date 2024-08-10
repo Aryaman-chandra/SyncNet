@@ -1,11 +1,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <yaml.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include "group_management_constants.h"
+#include <cjson/cJSON.h>
+#define JSON_FILE_NAME "groups.json"
 #define DAEMON_PORT 12345 
 typedef struct {
     char name[MAX_NAME_LENGTH];
@@ -19,141 +20,131 @@ typedef struct {
     char multicast_ip[MAX_IP_LENGTH];
 } Group;
 
+
+
 Group groups[MAX_GROUPS];
 int group_count = 0;
 
-
-void parse_yaml() {
-    FILE* file = fopen(YAML_FILE_NAME, "r");
-    yaml_parser_t parser;
-    yaml_event_t event;
-
+void parse_json() {
+    FILE* file = fopen(JSON_FILE_NAME, "r");
     if (!file) {
-        perror("fopen");
-        return;
-    }
-
-    if (!yaml_parser_initialize(&parser)) {
-        fprintf(stderr, "Failed to initialize parser\n");
+        printf("groups.json not found. Creating a new file with an empty structure.\n");
+        file = fopen(JSON_FILE_NAME, "w");
+        if (!file) {
+            perror("Error creating file");
+            return;
+        }
+        fprintf(file, "{\"groups\":[]}\n");
         fclose(file);
         return;
     }
 
-    yaml_parser_set_input_file(&parser, file);
+    fseek(file, 0, SEEK_END);
+    long file_size = ftell(file);
+    fseek(file, 0, SEEK_SET);
 
-    Group* current_group = NULL;
-    User* current_user = NULL;
-    char* key = NULL;
-    int in_groups = 0;
-    int in_users = 0;
-
-    do {
-        if (!yaml_parser_parse(&parser, &event)) {
-            fprintf(stderr, "Parser error\n");
-            break;
-        }
-
-        switch (event.type) {
-            case YAML_SCALAR_EVENT:
-                if (strcmp((char*)event.data.scalar.value, "groups") == 0) {
-                    in_groups = 1;
-                } else if (in_groups) {
-                    if (key == NULL) {
-                        key = strdup((char*)event.data.scalar.value);
-                    } else {
-                        if (current_user) {
-                            if (strcmp(key, "name") == 0) {
-                                strncpy(current_user->name, (char*)event.data.scalar.value, MAX_NAME_LENGTH);
-                            } else if (strcmp(key, "ip") == 0) {
-                                strncpy(current_user->ip, (char*)event.data.scalar.value, MAX_IP_LENGTH);
-                            }
-                        } else if (current_group) {
-                            if (strcmp(key, "name") == 0) {
-                                strncpy(current_group->name, (char*)event.data.scalar.value, MAX_NAME_LENGTH);
-                            } else if (strcmp(key, "multicast_ip") == 0) {
-                                strncpy(current_group->multicast_ip, (char*)event.data.scalar.value, MAX_IP_LENGTH);
-                            }
-                        }
-                        free(key);
-                        key = NULL;
-                    }
-                }
-                break;
-
-            case YAML_MAPPING_START_EVENT:
-                if (in_groups && !current_group) {
-                    if (group_count < MAX_GROUPS) {
-                        current_group = &groups[group_count++];
-                        current_group->user_count = 0;
-                    } else {
-                        fprintf(stderr, "Maximum number of groups reached.\n");
-                        in_groups = 0;
-                    }
-                } else if (current_group && !current_user) {
-                    current_user = &current_group->users[current_group->user_count++];
-                }
-                break;
-
-            case YAML_MAPPING_END_EVENT:
-                if (current_user) {
-                    current_user = NULL;
-                } else if (current_group) {
-                    current_group = NULL;
-                }
-                break;
-
-            case YAML_SEQUENCE_START_EVENT:
-                if (in_groups && current_group && key && strcmp(key, "users") == 0) {
-                    in_users = 1;
-                }
-                break;
-
-            case YAML_SEQUENCE_END_EVENT:
-                if (in_users) {
-                    in_users = 0;
-                }
-                break;
-
-            case YAML_STREAM_END_EVENT:
-                break;
-
-            default:
-                break;
-        }
-
-        if (event.type != YAML_STREAM_END_EVENT) {
-            yaml_event_delete(&event);
-        }
-    } while (event.type != YAML_STREAM_END_EVENT);
-
-    yaml_event_delete(&event);
-    yaml_parser_delete(&parser);
+    char* json_string = (char*)malloc(file_size + 1);
+    fread(json_string, 1, file_size, file);
     fclose(file);
 
-}
+    json_string[file_size] = '\0';
 
-void save_yaml() {
-    FILE* file = fopen(YAML_FILE_NAME, "w");
-    if (!file) {
-        fprintf(stderr, "Failed to open file for writing: %s\n", YAML_FILE_NAME);
+    cJSON* root = cJSON_Parse(json_string);
+    free(json_string);
+
+    if (!root) {
+        const char* error_ptr = cJSON_GetErrorPtr();
+        if (error_ptr != NULL) {
+            fprintf(stderr, "JSON parsing error: %s\n", error_ptr);
+        }
         return;
     }
 
-    fprintf(file, "groups:\n");
+    // Clear existing groups
+    group_count = 0;
+
+    // Parse groups from JSON
+    cJSON* groups_json = cJSON_GetObjectItem(root, "groups");
+    if (cJSON_IsArray(groups_json)) {
+        cJSON* group_json = NULL;
+        cJSON_ArrayForEach(group_json, groups_json) {
+            if (group_count >= MAX_GROUPS) {
+                fprintf(stderr, "Warning: Too many groups in the JSON file, ignoring extra groups.\n");
+                break;
+            }
+
+            cJSON* name = cJSON_GetObjectItem(group_json, "name");
+            cJSON* multicast_ip = cJSON_GetObjectItem(group_json, "multicast_ip");
+            cJSON* users_json = cJSON_GetObjectItem(group_json, "users");
+
+            if (cJSON_IsString(name) && cJSON_IsString(multicast_ip) && cJSON_IsArray(users_json)) {
+                Group* current_group = &groups[group_count++];
+                strncpy(current_group->name, name->valuestring, MAX_NAME_LENGTH);
+                strncpy(current_group->multicast_ip, multicast_ip->valuestring, MAX_IP_LENGTH);
+                current_group->user_count = 0;
+
+                cJSON* user_json = NULL;
+                cJSON_ArrayForEach(user_json, users_json) {
+                    if (current_group->user_count >= MAX_USERS) {
+                        fprintf(stderr, "Warning: Too many users in group '%s', ignoring extra users.\n", current_group->name);
+                        break;
+                    }
+
+                    cJSON* user_name = cJSON_GetObjectItem(user_json, "name");
+                    cJSON* user_ip = cJSON_GetObjectItem(user_json, "ip");
+
+                    if (cJSON_IsString(user_name) && cJSON_IsString(user_ip)) {
+                        User* current_user = &current_group->users[current_group->user_count++];
+                        strncpy(current_user->name, user_name->valuestring, MAX_NAME_LENGTH);
+                        strncpy(current_user->ip, user_ip->valuestring, MAX_IP_LENGTH);
+                    }
+                }
+            }
+        }
+    } else {
+        fprintf(stderr, "Error: 'groups' is not an array\n");
+    }
+
+    cJSON_Delete(root);
+}
+
+void save_json() {
+    cJSON* root = cJSON_CreateObject();
+    cJSON* groups_json = cJSON_CreateArray();
+    cJSON_AddItemToObject(root, "groups", groups_json);
+
     for (int i = 0; i < group_count; i++) {
-        fprintf(file, "  - name: %s\n", groups[i].name);
-        fprintf(file, "    multicast_ip: %s\n", groups[i].multicast_ip);
-        fprintf(file, "    users:\n");
+        cJSON* group_item = cJSON_CreateObject();
+        cJSON_AddItemToArray(groups_json, group_item);
+
+        cJSON_AddStringToObject(group_item, "name", groups[i].name);
+        cJSON_AddStringToObject(group_item, "multicast_ip", groups[i].multicast_ip);
+
+        cJSON* users = cJSON_CreateArray();
+        cJSON_AddItemToObject(group_item, "users", users);
+
         for (int j = 0; j < groups[i].user_count; j++) {
-            fprintf(file, "      - name: %s\n", groups[i].users[j].name);
-            fprintf(file, "        ip: %s\n", groups[i].users[j].ip);
+            cJSON* user_item = cJSON_CreateObject();
+            cJSON_AddItemToArray(users, user_item);
+
+            cJSON_AddStringToObject(user_item, "name", groups[i].users[j].name);
+            cJSON_AddStringToObject(user_item, "ip", groups[i].users[j].ip);
         }
     }
 
-    fclose(file);
-    printf("Changes saved to %s\n", YAML_FILE_NAME);
-}
+    char* json_string = cJSON_Print(root);
+    FILE* file = fopen(JSON_FILE_NAME, "w");
+    if (file) {
+        fputs(json_string, file);
+        fclose(file);
+        printf("Changes saved to %s\n", JSON_FILE_NAME);
+    } else {
+        fprintf(stderr, "Error opening file for writing\n");
+    }
 
+    free(json_string);
+    cJSON_Delete(root);
+}
 void signal_user_daemon(const char* user_ip, const char* multicast_ip) {
     int sock;
     struct sockaddr_in server_addr;
@@ -244,7 +235,7 @@ void print_groups() {
 }
 
 int main() {
-    parse_yaml();
+    parse_json();
     int choice;
     char group_name[MAX_NAME_LENGTH], user_name[MAX_NAME_LENGTH], ip[MAX_IP_LENGTH];
 
@@ -285,9 +276,11 @@ int main() {
                 print_groups();
                 break;
             case 5:
-                save_yaml();
+                save_json();  // Changed from save_yaml() to save_json()
                 break;
             case 0:
+                printf("Saving changes before exit...\n");
+                save_json();  // Added to ensure changes are saved on exit
                 printf("Exiting...\n");
                 break;
             default:
@@ -297,3 +290,7 @@ int main() {
 
     return 0;
 }
+//Modify the parse_yaml function:
+
+
+
