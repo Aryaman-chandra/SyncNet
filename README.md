@@ -33,8 +33,10 @@ sudo apt-get install build-essential
 ```
 
 3. For using admin panel change the macro `#define ADMIN_IP` with the ip address of your actual admin machine.
-4. Run Startup script.
-5. To run admin_panel.
+4. npm install express.
+5. node index.js
+6. Run Startup scrip.
+7. To run admin_panel.
 ```bash
 	./admin_panel 
 ```
