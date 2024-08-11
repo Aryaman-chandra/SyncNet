@@ -61,7 +61,7 @@ compile_programs() {
     gcc -o admin_panel admin_panel.c -lssl -lcrypto -lm -lcjson
 
     echo "Compiling TUI client..."
-    gcc -o tui_client tui_client.c -lssl -lcrypto -lcurl -ljson-c
+    gcc -o tui_client ./TUI/ui_program.c -lssl -lcrypto -lcurl -ljson-c
 
     echo "Compilation complete."
 }
@@ -71,13 +71,13 @@ setup_node_server() {
     echo "Setting up Node.js server..."
     npm install
     echo "Starting Node.js server in the background..."
-    node server.js &
+    node ./backend/index.js &
 }
 
 # Function to start the TUI
 start_tui() {
     echo "Starting TUI in the background..."
-    ./tui_client &
+    ./tui_client 
 }
 
 # Main script
