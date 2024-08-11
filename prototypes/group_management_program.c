@@ -1,13 +1,20 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <arpa/inet.h>
+#include <sys/socket.h>
 #include <unistd.h>
-#include "group_management_constants.h"
+#include <errno.h>
+#include <syslog.h>
+#include <yaml.h>
 #include <cjson/cJSON.h>
+#include "group_management_constants.h"
+
+
 #define JSON_FILE_NAME "groups.json"
-#define DAEMON_PORT 12345 
+#define DAEMON_PORT 12345
+#define MESSAGE "Hello, multicast world!"
+
 typedef struct {
     char name[MAX_NAME_LENGTH];
     char ip[MAX_IP_LENGTH];
@@ -20,10 +27,9 @@ typedef struct {
     char multicast_ip[MAX_IP_LENGTH];
 } Group;
 
-
-
 Group groups[MAX_GROUPS];
 int group_count = 0;
+
 
 void parse_json() {
     FILE* file = fopen(JSON_FILE_NAME, "r");
@@ -145,28 +151,26 @@ void save_json() {
     free(json_string);
     cJSON_Delete(root);
 }
+
 void signal_user_daemon(const char* user_ip, const char* multicast_ip) {
     int sock;
     struct sockaddr_in server_addr;
     char message[256];
 
-    // Create UDP socket
     if ((sock = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
         perror("Socket creation failed");
         return;
     }
 
     memset(&server_addr, 0, sizeof(server_addr));
-
-    // Set up the server address structure
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(DAEMON_PORT);
-    server_addr.sin_addr.s_addr = inet_addr(user_ip);
 
-    // Prepare the message
+
+  server_addr.sin_addr.s_addr = inet_addr(user_ip);
+
     snprintf(message, sizeof(message), "JOIN %s", multicast_ip);
 
-    // Send the message
     if (sendto(sock, message, strlen(message), 0,
                (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
         perror("Failed to send message to daemon");
@@ -177,16 +181,51 @@ void signal_user_daemon(const char* user_ip, const char* multicast_ip) {
     close(sock);
 }
 
-// Modified add_user function
+void send_multicast(const char* multicast_ip, const char* message) {
+    int sockfd;
+    struct sockaddr_in addr;
+    int message_len = strlen(message);
+    int ttl = 255;  // Set TTL for multicast
+
+    if ((sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
+        syslog(LOG_ERR, "Socket creation failed: %s", strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+
+    // Set TTL for multicast
+    if (setsockopt(sockfd, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl)) < 0) {
+        syslog(LOG_ERR, "setsockopt for TTL failed: %s", strerror(errno));
+        close(sockfd);
+        exit(EXIT_FAILURE);
+    }
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = inet_addr(multicast_ip);
+    addr.sin_port = htons(DAEMON_PORT);
+
+    if (sendto(sockfd, message, message_len, 0, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        syslog(LOG_ERR, "sendto failed: %s", strerror(errno));
+        close(sockfd);
+        exit(EXIT_FAILURE);
+    }
+
+    syslog(LOG_INFO, "Message sent to %s: %s", multicast_ip, message);
+
+    close(sockfd);
+}
+
+
 void add_user(const char* group_name, const char* user_name, const char* user_ip) {
     for (int i = 0; i < group_count; i++) {
         if (strcmp(groups[i].name, group_name) == 0) {
             if (groups[i].user_count < MAX_USERS) {
                 User* new_user = &groups[i].users[groups[i].user_count++];
-                strncpy(new_user->name, user_name, MAX_NAME_LENGTH);
+
+             strncpy(new_user->name, user_name, MAX_NAME_LENGTH);
                 strncpy(new_user->ip, user_ip, MAX_IP_LENGTH);
                 printf("User added successfully.\n");
-                
+
                 // Signal the user daemon to join the multicast group
                 signal_user_daemon(user_ip, groups[i].multicast_ip);
             } else {
@@ -229,15 +268,39 @@ void print_groups() {
         printf("Group: %s (Multicast IP: %s)\n", groups[i].name, groups[i].multicast_ip);
         for (int j = 0; j < groups[i].user_count; j++) {
             printf("  User: %s (IP: %s)\n", groups[i].users[j].name, groups[i].users[j].ip);
-        }
-        printf("\n");
+       }
     }
 }
 
+void save_message_to_file(const char* message) {
+    FILE* file = fopen("message.txt", "w");
+    if (!file) {
+        fprintf(stderr, "Failed to open file for writing: message.txt\n");
+        return;
+    }
+
+    fprintf(file, "%s\n", message);
+    fclose(file);
+}
+
+void send_message_to_group(const char* group_name, const char* message) {
+    for (int i = 0; i < group_count; i++) {
+        if (strcmp(groups[i].name, group_name) == 0) {
+            save_message_to_file(message);
+            send_multicast(groups[i].multicast_ip, message);
+            return;
+        }
+    }
+    fprintf(stderr, "Group not found.\n");
+}
+
+
 int main() {
+    openlog("administrator", LOG_PID | LOG_CONS, LOG_USER);
+
     parse_json();
     int choice;
-    char group_name[MAX_NAME_LENGTH], user_name[MAX_NAME_LENGTH], ip[MAX_IP_LENGTH];
+    char group_name[MAX_NAME_LENGTH], user_name[MAX_NAME_LENGTH], ip[MAX_IP_LENGTH], message[256];
 
     do {
         printf("\nGroup Management Menu:\n");
@@ -246,6 +309,7 @@ int main() {
         printf("3. Remove group\n");
         printf("4. Print all groups\n");
         printf("5. Save changes\n");
+        printf("6. Send message to group\n");
         printf("0. Exit\n");
         printf("Enter your choice: ");
         scanf("%d", &choice);
@@ -261,7 +325,7 @@ int main() {
                 add_user(group_name, user_name, ip);
                 break;
             case 2:
-                printf("Enter new group name: ");
+             printf("Enter new group name: ");
                 scanf("%s", group_name);
                 printf("Enter multicast IP: ");
                 scanf("%s", ip);
@@ -276,11 +340,16 @@ int main() {
                 print_groups();
                 break;
             case 5:
-                save_json();  // Changed from save_yaml() to save_json()
+                save_json();
+                break;
+            case 6:
+                printf("Enter group name to send message to: ");
+                scanf("%s", group_name);
+                printf("Enter message to send: ");
+                scanf(" %[^\n]", message);  // Read message with spaces
+                send_message_to_group(group_name, message);
                 break;
             case 0:
-                printf("Saving changes before exit...\n");
-                save_json();  // Added to ensure changes are saved on exit
                 printf("Exiting...\n");
                 break;
             default:
@@ -288,9 +357,7 @@ int main() {
         }
     } while (choice != 0);
 
+    closelog();
+
     return 0;
 }
-//Modify the parse_yaml function:
-
-
-
