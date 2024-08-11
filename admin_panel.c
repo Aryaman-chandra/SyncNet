@@ -1,4 +1,3 @@
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,7 +13,7 @@
 #include <fcntl.h>
 #include <openssl/md5.h>
 #include <dirent.h>
-
+#include <time.h>
 
 #define JSON_FILE_NAME "groups.json"
 #define DAEMON_PORT 12345
@@ -28,6 +27,9 @@
 #define RETRY_DELAY 1000000  // 1 second in microseconds
 #define MAX_FILES 100
 #define ADMIN_IP "192.168.43.151"
+
+#define PENDING_REQUESTS_FILE "pending_requests.json"
+#define MAX_JSON_SIZE 10240 // Adjust as needed
 
 typedef struct {
     char name[MAX_NAME_LENGTH];
@@ -544,6 +546,81 @@ int select_group(char *selected_group_name) {
     return 0;
 }
 
+// New function to read pending requests from JSON file
+void read_pending_requests() {
+    FILE *file = fopen(PENDING_REQUESTS_FILE, "r");
+    if (file == NULL) {
+        printf("No pending requests.\n");
+        return;
+    }
+
+    // Read the entire file content
+    fseek(file, 0, SEEK_END);
+    long file_size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+
+    if (file_size == 0) {
+        printf("No pending requests.\n");
+        fclose(file);
+        return;
+    }
+
+    char *json_string = (char *)malloc(file_size + 1);
+    if (json_string == NULL) {
+        fprintf(stderr, "Memory allocation failed.\n");
+        fclose(file);
+        return;
+    }
+
+    fread(json_string, 1, file_size, file);
+    json_string[file_size] = '\0';
+    fclose(file);
+
+    // Parse JSON
+    cJSON *root = cJSON_Parse(json_string);
+    free(json_string);
+
+    if (root == NULL) {
+        const char *error_ptr = cJSON_GetErrorPtr();
+        if (error_ptr != NULL) {
+            fprintf(stderr, "JSON parsing error: %s\n", error_ptr);
+        }
+        return;
+    }
+
+    // Read and display pending requests
+    if (cJSON_IsArray(root)) {
+        int request_count = cJSON_GetArraySize(root);
+        if (request_count == 0) {
+            printf("No pending requests.\n");
+        } else {
+            printf("Pending Requests:\n");
+            for (int i = 0; i < request_count; i++) {
+                cJSON *request = cJSON_GetArrayItem(root, i);
+                cJSON *group_name = cJSON_GetObjectItemCaseSensitive(request, "group_name");
+                cJSON *ipAddress = cJSON_GetObjectItemCaseSensitive(request, "ipAddress");
+                cJSON *timestamp = cJSON_GetObjectItemCaseSensitive(request, "timestamp");
+                cJSON *date = cJSON_GetObjectItemCaseSensitive(request, "date");
+                cJSON *time = cJSON_GetObjectItemCaseSensitive(request, "time");
+
+                printf("%d. Group: %s, IP: %s", i + 1, 
+                       cJSON_IsString(group_name) ? group_name->valuestring : "N/A",
+                       cJSON_IsString(ipAddress) ? ipAddress->valuestring : "N/A");
+
+                if (cJSON_IsString(timestamp)) {
+                    printf(", Timestamp: %s", timestamp->valuestring);
+                } else if (cJSON_IsString(date) && cJSON_IsString(time)) {
+                    printf(", Date: %s, Time: %s", date->valuestring, time->valuestring);
+                }
+                printf("\n");
+            }
+        }
+    } else {
+        printf("Invalid JSON format for pending requests.\n");
+    }
+
+    cJSON_Delete(root);
+}
 // Main function
 int main() {
     openlog("group_manager", LOG_PID | LOG_CONS, LOG_USER);
@@ -566,6 +643,7 @@ int main() {
         printf("6. Send message to group\n");
         printf("7. Perform network scan\n");
         printf("8. Transfer file via multicast\n");
+        printf("9. See pending requests\n");
         printf("0. Exit\n");
         printf("Enter your choice: ");
         scanf("%d", &choice);
@@ -674,6 +752,9 @@ int main() {
                     free(files[i]);
                 }
                 close(sock);
+                break;
+            case 9:
+                read_pending_requests();
                 break;
             case 0:
                 printf("Exiting...\n");
